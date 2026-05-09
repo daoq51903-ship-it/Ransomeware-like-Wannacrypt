@@ -1,4 +1,4 @@
 # ransomewarelikewannacrypt
 :)))
-#use Alarm.wav
+# use Alarm.wav
 luvy'all
